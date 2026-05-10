@@ -5,7 +5,7 @@ import { TwitterPost } from './TwitterPost';
 export interface DownloadTask {
   gid: string;
   post: TwitterPost;
-  media: TwitterMedia;
+  media?: TwitterMedia;
   fileName: string;
   dir: string;
   totalSize: number;
@@ -15,4 +15,5 @@ export interface DownloadTask {
   updatedAt: number;
   downloadUrl: string;
   ariaRetryCountRemains: number;
+  contentPath?: string;
 }

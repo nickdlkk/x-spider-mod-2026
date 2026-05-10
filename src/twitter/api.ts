@@ -439,13 +439,6 @@ export async function getUserTweets(
             R.isNotNil,
             // 过滤掉转推
             R.complement(R.hasPath(['legacy', 'retweeted_status_result'])),
-            // 过滤掉无媒体
-            R.hasPath(['legacy', 'entities', 'media']),
-            R.pathSatisfies(R.pipe(R.length, R.lte(0)), [
-              'legacy',
-              'entities',
-              'media',
-            ]),
           ]),
         ),
       )(instructions);

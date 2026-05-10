@@ -115,6 +115,13 @@ export const DownloadController: React.FC = () => {
             ]}
           />
         </Form.Item>
+        <Form.Item
+          name="downloadTextOnly"
+          valuePropName="checked"
+          tooltip="开启后，时间范围内所有帖子都会被下载（包括不含媒体的纯文字帖）。"
+        >
+          <Checkbox>下载纯文字帖</Checkbox>
+        </Form.Item>
       </Form>
       <hr className="my-4" />
       <section className="flex space-x-2">

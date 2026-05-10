@@ -3,5 +3,5 @@ import { TwitterPost } from './TwitterPost';
 
 export interface FileNameTemplateData {
   post: TwitterPost;
-  media: TwitterMedia;
+  media: TwitterMedia | undefined;
 }

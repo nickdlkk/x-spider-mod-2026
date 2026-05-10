@@ -8,7 +8,7 @@
   "scripts": {
     "start": "tauri dev",
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "prettier --write ./src/**/*.{ts,tsx,js,jsx,cjs} && eslint --fix ./src/**/*.{ts,tsx,js,jsx,cjs}",

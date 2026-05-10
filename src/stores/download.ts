@@ -27,7 +27,60 @@ function log() {
 
 export interface CreateDownloadTaskParams {
   post: TwitterPost;
-  media: TwitterMedia;
+  media?: TwitterMedia;
+}
+
+// ==============================================
+// 帖子内容写入 Markdown 文件（幂等：检查文件是否存在）
+// ==============================================
+async function writePostContentFile(post: TwitterPost): Promise<string | null> {
+  const settings = useSettingsStore.getState();
+  const bloggerName = post.user.screenName;
+  const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+  const resolvedDir = await path.join(settings.download.saveDirBase, safeBloggerName);
+
+  const templateData: FileNameTemplateData = { post, media: post.medias?.[0] };
+  const baseFileName = resolveVariables(
+    settings.download.fileNameTemplate,
+    templateData,
+  ).replace(/\.[^.]+$/, ''); // 去掉扩展名
+  const contentFileName = `${baseFileName}.md`;
+  const contentPath = await path.join(resolvedDir, contentFileName);
+
+  // 幂等：已存在则跳过
+  if (await fs.exists(contentPath)) {
+    log().info('Skip existing content file', contentPath);
+    return contentPath;
+  }
+
+  // 构造 Markdown 内容
+  const mediaSection = post.medias && post.medias.length > 0
+    ? `\n**Media**\n\n${post.medias.map(m => `![](${m.url})`).join('\n')}`
+    : '';
+
+  const content = `---
+id: ${post.id}
+author: @${post.user.screenName}
+date: ${post.createdAt ? post.createdAt.format('YYYY-MM-DD HH:mm:ss') : 'unknown'}
+url: https://x.com/${post.user.screenName}/status/${post.id}
+views: ${post.views ?? 'unknown'}
+likes: ${post.favoriteCount ?? 0}
+retweets: ${post.retweetCount ?? 0}
+replies: ${post.replyCount ?? 0}
+bookmarks: ${post.bookmarkCount ?? 0}
+---
+
+${post.fullText || ''}${mediaSection}
+`;
+
+  try {
+    await fs.writeTextFile(contentPath, content);
+    log().info('Written content file', contentPath);
+    return contentPath;
+  } catch (err) {
+    log().warn('Failed to write content file', err);
+    return null;
+  }
 }
 
 async function mergeAriaStatusToDownloadTask(
@@ -56,25 +109,41 @@ async function prepareDownloadTask({
   media,
 }: CreateDownloadTaskParams): Promise<DownloadTask> {
   const settings = useSettingsStore.getState();
-  const downloadUrl = getDownloadUrl(media);
-  log().info('downloadUrl', downloadUrl);
 
-  // ==============================================
-  // 核心修改：自动获取博主用户名并创建文件夹
-  // ==============================================
   const bloggerName = post.user.screenName;
   const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
 
-  const templateData: FileNameTemplateData = {
-    media,
-    post,
-  };
+  const templateData: FileNameTemplateData = { media, post };
 
-  // 强制路径：下载目录 / 博主用户名
   const dir = await path.join(settings.download.saveDirBase, safeBloggerName);
-  
   log().info('resolved dirName', safeBloggerName);
   log().info('resolved dir', dir);
+
+  // 无媒体：生成纯文字任务
+  if (!media) {
+    const fileName = `${post.id}.md`;
+    const contentPath = await writePostContentFile(post);
+    const task: DownloadTask = {
+      gid: '',
+      status: AriaStatus.Complete,
+      completeSize: 0,
+      totalSize: 0,
+      fileName,
+      media: undefined,
+      post,
+      error: '',
+      dir,
+      updatedAt: Date.now(),
+      downloadUrl: '',
+      ariaRetryCountRemains: 0,
+      contentPath: contentPath || undefined,
+    };
+    return task;
+  }
+
+  // 有媒体：正常下载
+  const downloadUrl = getDownloadUrl(media);
+  log().info('downloadUrl', downloadUrl);
 
   const fileName = resolveVariables(
     settings.download.fileNameTemplate,
@@ -82,6 +151,9 @@ async function prepareDownloadTask({
   );
 
   log().info('resolved fileName', fileName);
+
+  // 下载媒体时同时写 Markdown 内容文件（幂等）
+  const contentPath = await writePostContentFile(post);
 
   const task: DownloadTask = {
     gid: '',
@@ -96,6 +168,7 @@ async function prepareDownloadTask({
     updatedAt: Date.now(),
     downloadUrl,
     ariaRetryCountRemains: 5,
+    contentPath: contentPath || undefined,
   };
 
   return task;
@@ -462,7 +535,22 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
     const paramsList: CreateDownloadTaskParams[] = [];
 
     for (const post of filteredPosts) {
-      const filteredMedias = post.medias!.filter(
+      // 【下载纯文字帖】模式下：无媒体的帖子直接写 Markdown 文件
+      if (filter.downloadTextOnly && (!post.medias || post.medias.length === 0)) {
+        const bloggerName = post.user.screenName;
+        const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+        const resolvedDir = await path.join(settings.download.saveDirBase, safeBloggerName);
+        const contentPath = await writePostContentFile(post);
+        if (contentPath) {
+          completeCount++;
+        } else {
+          skipCount++;
+        }
+        updateCreationTask({ ...task, completeCount, skipCount });
+        continue;
+      }
+
+      const filteredMedias = (post.medias || []).filter(
         R.allPass([
           (media) => {
             if (!filter.mediaTypes) return false;

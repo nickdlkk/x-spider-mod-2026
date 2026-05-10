@@ -42,6 +42,7 @@ export const useHomepageStore = create<HomepageStore>((set, get) => ({
   filter: {
     mediaTypes: [MediaType.Photo, MediaType.Video, MediaType.Gif],
     source: 'medias',
+    downloadTextOnly: false,
   },
   setFilter: (filter) => set({ filter }),
 
