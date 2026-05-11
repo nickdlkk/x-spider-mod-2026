@@ -149,7 +149,7 @@ export const DownloadListItem: React.FC<DownloadListItemProps> = ({
         title="打开推文页"
       >
         <img
-          src={`${t.media.url}?format=jpg&name=thumb`}
+          src={`${t.media?.url}?format=jpg&name=thumb`}
           loading="lazy"
           className="w-full h-full object-cover transition-transform transform hover:scale-105"
         />

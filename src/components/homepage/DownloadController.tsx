@@ -24,7 +24,10 @@ export const DownloadController: React.FC = () => {
       return;
     }
 
-    if (!filter.mediaTypes || filter.mediaTypes.length === 0) {
+    if (
+      !filter.downloadTextOnly &&
+      (!filter.mediaTypes || filter.mediaTypes.length === 0)
+    ) {
       message.error('请至少选择一个媒体类型');
       return;
     }

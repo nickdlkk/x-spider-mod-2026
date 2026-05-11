@@ -32,31 +32,61 @@ export interface CreateDownloadTaskParams {
 
 // ==============================================
 // 帖子内容写入 Markdown 文件（幂等：检查文件是否存在）
+// mediaLocalPaths: 可选的本地媒体文件路径数组，用于替换网络链接
 // ==============================================
-async function writePostContentFile(post: TwitterPost): Promise<string | null> {
+async function writePostContentFile(
+  post: TwitterPost,
+  mediaLocalPaths?: string[],
+): Promise<string | null> {
+  log().info('[DEBUG writePostContentFile] START post.id=', post.id);
   const settings = useSettingsStore.getState();
-  const bloggerName = post.user.screenName;
-  const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
-  const resolvedDir = await path.join(settings.download.saveDirBase, safeBloggerName);
+  log().info(
+    '[DEBUG writePostContentFile] settings.download.saveDirBase=',
+    settings.download.saveDirBase,
+  );
 
-  const templateData: FileNameTemplateData = { post, media: post.medias?.[0] };
-  const baseFileName = resolveVariables(
-    settings.download.fileNameTemplate,
-    templateData,
-  ).replace(/\.[^.]+$/, ''); // 去掉扩展名
+  const bloggerName = post.user.screenName;
+  log().info('[DEBUG writePostContentFile] bloggerName=', bloggerName);
+
+  const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+  log().info('[DEBUG writePostContentFile] safeBloggerName=', safeBloggerName);
+
+  const resolvedDir = await path.join(
+    settings.download.saveDirBase,
+    safeBloggerName,
+  );
+  log().info('[DEBUG writePostContentFile] resolvedDir=', resolvedDir);
+
+  // 纯文字帖直接用 postId 作为文件名，避免 resolveVariables 中访问 undefined media 报错
+  const baseFileName = post.id;
   const contentFileName = `${baseFileName}.md`;
   const contentPath = await path.join(resolvedDir, contentFileName);
+  log().info('[DEBUG writePostContentFile] contentPath=', contentPath);
 
   // 幂等：已存在则跳过
-  if (await fs.exists(contentPath)) {
+  const fileExists = await fs.exists(contentPath);
+  log().info('[DEBUG writePostContentFile] fileExists=', fileExists);
+  if (fileExists) {
     log().info('Skip existing content file', contentPath);
     return contentPath;
   }
 
-  // 构造 Markdown 内容
-  const mediaSection = post.medias && post.medias.length > 0
-    ? `\n**Media**\n\n${post.medias.map(m => `![](${m.url})`).join('\n')}`
-    : '';
+  // 构造 Markdown 内容，图片使用本地文件路径
+  let mediaSection = '';
+  if (post.medias && post.medias.length > 0) {
+    const mediaLines = post.medias.map((m, index) => {
+      const localPath =
+        mediaLocalPaths && mediaLocalPaths[index]
+          ? mediaLocalPaths[index]
+          : m.url; // 如果没有本地路径则使用网络链接
+      return `![](${localPath})`;
+    });
+    mediaSection = `\n**Media**\n\n${mediaLines.join('\n')}`;
+  }
+  log().info(
+    '[DEBUG writePostContentFile] mediaSection constructed, length=',
+    mediaSection.length,
+  );
 
   const content = `---
 id: ${post.id}
@@ -72,8 +102,13 @@ bookmarks: ${post.bookmarkCount ?? 0}
 
 ${post.fullText || ''}${mediaSection}
 `;
+  log().info(
+    '[DEBUG writePostContentFile] content constructed, length=',
+    content.length,
+  );
 
   try {
+    log().info('[DEBUG writePostContentFile] about to writeTextFile...');
     await fs.writeTextFile(contentPath, content);
     log().info('Written content file', contentPath);
     return contentPath;
@@ -102,7 +137,7 @@ async function mergeAriaStatusToDownloadTask(
 }
 
 // ==============================================
-// 【已修改：自动按博主用户名分类】
+// 【已修改：自动按博主用户名分类，Markdown 在帖子级别统一写入】
 // ==============================================
 async function prepareDownloadTask({
   post,
@@ -152,9 +187,6 @@ async function prepareDownloadTask({
 
   log().info('resolved fileName', fileName);
 
-  // 下载媒体时同时写 Markdown 内容文件（幂等）
-  const contentPath = await writePostContentFile(post);
-
   const task: DownloadTask = {
     gid: '',
     status: AriaStatus.Waiting,
@@ -168,7 +200,7 @@ async function prepareDownloadTask({
     updatedAt: Date.now(),
     downloadUrl,
     ariaRetryCountRemains: 5,
-    contentPath: contentPath || undefined,
+    contentPath: undefined, // Markdown 在帖子级别统一写入
   };
 
   return task;
@@ -271,39 +303,57 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
 
     for (const params of paramsList) {
       const task = await prepareDownloadTask(params);
+      // 跳过没有 downloadUrl 的任务（纯文字帖已在 prepareDownloadTask 中处理）
+      if (!task.downloadUrl) {
+        continue;
+      }
       tasks.push(task);
     }
 
     if (tasks.length === 0) {
+      log().info(
+        'batchCreateDownloadTask: no tasks with downloadUrl, skipping',
+      );
       return;
     }
 
-    const gids: string[] = (
-      await aria2.batchInvoke(
-        tasks.map((task) => ({
-          methodName: 'aria2.addUri',
-          params: [
-            [task.downloadUrl],
-            {
-              dir: task.dir,
-              out: task.fileName,
-            },
-          ],
-        })),
-      )
-    ).flat();
+    log().info(
+      'batchCreateDownloadTask: submitting',
+      tasks.length,
+      'tasks to aria2',
+    );
 
-    const statusMap = await aria2.tellStatus(gids);
+    try {
+      const gids: string[] = (
+        await aria2.batchInvoke(
+          tasks.map((task) => ({
+            methodName: 'aria2.addUri',
+            params: [
+              [task.downloadUrl],
+              {
+                dir: task.dir,
+                out: task.fileName,
+              },
+            ],
+          })),
+        )
+      ).flat();
 
-    tasks.forEach((task, index) => {
-      task.gid = gids[index];
-      task.status = statusMap[task.gid].status;
-    });
+      const statusMap = await aria2.tellStatus(gids);
 
-    const newTasks = get().downloadTasks.concat(tasks);
-    set({
-      downloadTasks: newTasks,
-    });
+      tasks.forEach((task, index) => {
+        task.gid = gids[index];
+        task.status = statusMap[task.gid]?.status;
+      });
+
+      const newTasks = get().downloadTasks.concat(tasks);
+      set({
+        downloadTasks: newTasks,
+      });
+    } catch (err) {
+      log().error('batchCreateDownloadTask error:', err);
+      throw err;
+    }
   },
   pauseDownloadTask: async (gid) => {
     await aria2.invoke('aria2.pause', gid);
@@ -504,9 +554,53 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
     nextCursor = cursor;
     now = R.last(twitterPosts)?.createdAt || now;
     log().info('Now', now.format('YYYY-MM-DD'), 'next cursor', nextCursor);
+    log().info(
+      'DEBUG: total posts fetched:',
+      twitterPosts.length,
+      'downloadTextOnly:',
+      filter.downloadTextOnly,
+      'source:',
+      filter.source,
+    );
+
+    // 检查是否有无媒体的帖子
+    const postsWithoutMedias = twitterPosts.filter(
+      (p) => !p.medias || p.medias.length === 0,
+    );
+    log().info('DEBUG: posts WITHOUT medias:', postsWithoutMedias.length);
+    if (postsWithoutMedias.length > 0) {
+      postsWithoutMedias.forEach((p, i) => {
+        log().info(
+          `DEBUG text-only post[${i}]: id=${p.id}, text=${p.fullText?.substring(0, 50)}...`,
+        );
+      });
+    }
+
+    // 打印每个帖子的 media 情况
+    twitterPosts.forEach((post, i) => {
+      log().info(
+        `DEBUG post[${i}]: id=${post.id}, medias count=${post.medias?.length ?? 0}, text length=${post.fullText?.length ?? 0}`,
+      );
+    });
+
     const filteredPosts = twitterPosts.filter(
       R.allPass([
-        (post) => (post.medias ? post.medias.length >= 0 : false),
+        (post) => {
+          const result = post.medias
+            ? post.medias.length > 0
+            : filter.downloadTextOnly;
+          log().info(
+            'DEBUG filter1: post',
+            post.id,
+            'has medias?',
+            !!post.medias,
+            'len=',
+            post.medias?.length,
+            'result=',
+            result,
+          );
+          return result === true;
+        },
         (post) => {
           if (!post.createdAt) return true;
           return until ? post.createdAt.isBefore(until) : true;
@@ -518,6 +612,7 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
       ]),
     );
 
+    log().info('DEBUG: filteredPosts length:', filteredPosts.length);
     const filteredCount =
       getMediaCounts(twitterPosts) - getMediaCounts(filteredPosts);
     skipCount += filteredCount;
@@ -535,18 +630,35 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
     const paramsList: CreateDownloadTaskParams[] = [];
 
     for (const post of filteredPosts) {
+      log().info(
+        'DEBUG: processing post',
+        post.id,
+        'downloadTextOnly=',
+        filter.downloadTextOnly,
+        'has medias?',
+        !!post.medias,
+      );
       // 【下载纯文字帖】模式下：无媒体的帖子直接写 Markdown 文件
-      if (filter.downloadTextOnly && (!post.medias || post.medias.length === 0)) {
-        const bloggerName = post.user.screenName;
-        const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
-        const resolvedDir = await path.join(settings.download.saveDirBase, safeBloggerName);
-        const contentPath = await writePostContentFile(post);
-        if (contentPath) {
-          completeCount++;
-        } else {
-          skipCount++;
+      if (
+        filter.downloadTextOnly &&
+        (!post.medias || post.medias.length === 0)
+      ) {
+        log().info('DEBUG: writing text-only post', post.id);
+        try {
+          const contentPath = await writePostContentFile(post);
+          log().info(
+            'DEBUG: text-only post written, contentPath=',
+            contentPath,
+          );
+          if (contentPath) {
+            completeCount++;
+          } else {
+            skipCount++;
+          }
+          updateCreationTask({ ...task, completeCount, skipCount });
+        } catch (err) {
+          log().error('DEBUG: writePostContentFile error:', err);
         }
-        updateCreationTask({ ...task, completeCount, skipCount });
         continue;
       }
 
@@ -559,11 +671,40 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
         ]),
       );
 
+      if (filteredMedias.length === 0) {
+        continue;
+      }
+
       log().info('FilteredMedias', filteredMedias);
+
+      // 计算所有媒体的本地文件路径（用于 Markdown 引用）
+      const mediaLocalPaths = await Promise.all(
+        filteredMedias.map(async (media) => {
+          const mediaTemplateData: FileNameTemplateData = { media, post };
+          const mediaFileName = resolveVariables(
+            settings.download.fileNameTemplate,
+            mediaTemplateData,
+          );
+          const bloggerName = post.user.screenName;
+          const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+          const dir = await path.join(
+            settings.download.saveDirBase,
+            safeBloggerName,
+          );
+          return await path.join(dir, mediaFileName);
+        }),
+      );
+
+      // 在帖子级别写入 Markdown（使用本地文件路径）
+      await writePostContentFile(post, mediaLocalPaths);
+
       for (const media of filteredMedias) {
-        const task = await prepareDownloadTask({ post, media });
-        log().info('Prepared download task', task);
-        const filePath = await path.join(task.dir, task.fileName);
+        const downloadTask = await prepareDownloadTask({ post, media });
+        log().info('Prepared download task', downloadTask);
+        const filePath = await path.join(
+          downloadTask.dir,
+          downloadTask.fileName,
+        );
         log().info('Resolved file path', filePath);
         if (settings.download.sameFileSkip && (await fs.exists(filePath))) {
           skipCount++;

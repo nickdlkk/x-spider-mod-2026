@@ -118,7 +118,8 @@ export const REPLACER_MAP: Record<
     desc: '资源索引',
     replacer: (data) =>
       (
-        data.post.medias!.findIndex((media) => media.id === data.media.id) + 1
+        (data.post.medias?.findIndex((media) => media.id === data.media?.id) ??
+          0) + 1
       ).toString(),
   },
   CONTENT: {
@@ -140,12 +141,12 @@ export const REPLACER_MAP: Record<
   },
   MEDIA_TYPE: {
     desc: '媒体类型',
-    replacer: (data) => data.media.type,
+    replacer: (data) => data.media?.type,
   },
   EXT: {
     desc: '扩展名',
     replacer: R.pipe(
-      (data) => getDownloadUrl(data.media),
+      (data) => getDownloadUrl(data.media!),
       R.split('.'),
       R.last,
       R.split('?'),
